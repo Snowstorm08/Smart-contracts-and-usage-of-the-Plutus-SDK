@@ -5,113 +5,114 @@
 
 module ContractMonad where
 
+import Control.Monad              (forever, void)
 import Control.Monad.Freer.Extras as Extras
-import Data.Functor               (void)
 import Data.Text                  (Text, unpack)
 import Data.Void                  (Void)
 import Plutus.Contract            as Contract
 import Plutus.Trace.Emulator      as Emulator
 import Wallet.Emulator.Wallet
 
--- Contract w s e a
--- EmulatorTrace a
-
--- -------------------------------------------------------------------
--- contract1 - Throwing an exception
--- -------------------------------------------------------------------
-
--- Empty = no endpoints
--- Contract.logInfo can take anything that can be serialized as JSON
+-------------------------------------------------
+-- Contract 1 - Throwing an exception
+-------------------------------------------------
 
 contract1 :: Contract () Empty Text ()
 contract1 = do
-  void $ Contract.throwError "BOOM!"
-  Contract.logInfo @String "hello from the contract"
+    Contract.logInfo @String "Starting contract1..."
+    Contract.throwError "BOOM!"
+    -- This will never execute
+    Contract.logInfo @String "This will not be printed"
 
 trace1 :: EmulatorTrace ()
-trace1 = void $ activateContractWallet (knownWallet 1) contract1
+trace1 =
+    void $ activateContractWallet (knownWallet 1) contract1
 
 test1 :: IO ()
 test1 = runEmulatorTraceIO trace1
 
--- -------------------------------------------------------------------
--- contract2 - Handling exceptions
--- -------------------------------------------------------------------
-
--- Void as error type has no values (constructors)
--- means this contract can't throw an exception (no value of type Void)
+-------------------------------------------------
+-- Contract 2 - Handling exceptions
+-------------------------------------------------
 
 contract2 :: Contract () Empty Void ()
-contract2 = do
-  -- run a computation and handle an exception if one is thrown
-  -- handleError can also be handled with Maybe and Either monads
-  Contract.handleError
-    (\err -> Contract.logError $ "caught: " ++ unpack err)  -- exception handler function
-    contract1                                               -- contract we want to run
+contract2 =
+    Contract.handleError handler contract1
+  where
+    handler err =
+        Contract.logError $ "Caught error: " ++ unpack err
 
 trace2 :: EmulatorTrace ()
-trace2 = void $ activateContractWallet (knownWallet 1) contract1
+trace2 =
+    void $ activateContractWallet (knownWallet 1) contract2
 
 test2 :: IO ()
 test2 = runEmulatorTraceIO trace2
 
--- -------------------------------------------------------------------
--- MyContract3 - schema / endpoints
--- -------------------------------------------------------------------
+-------------------------------------------------
+-- Contract 3 - Endpoints (Improved)
+-------------------------------------------------
 
--- Invoke endpoints from outside contracts and provide data to the
--- contracts.
-
-type MySchema = Endpoint "foo" Int .\/ Endpoint "bar" String
+type MySchema =
+        Endpoint "foo" Int
+    .\/ Endpoint "bar" String
 
 contract3 :: Contract () MySchema Text ()
-contract3 = do
-  awaitPromise $ endpoint @"foo" Contract.logInfo -- apply to Int
-  awaitPromise $ endpoint @"bar" Contract.logInfo -- apply to String
+contract3 = forever $
+    awaitPromise $
+        foo `select` bar
+  where
+    foo = endpoint @"foo" $ \i ->
+        Contract.logInfo @String $ "foo called with: " ++ show i
+
+    bar = endpoint @"bar" $ \s ->
+        Contract.logInfo @String $ "bar called with: " ++ s
 
 trace3 :: EmulatorTrace ()
 trace3 = do
-  -- now we need the handle to the contract
-  h <- activateContractWallet (knownWallet 1) contract3
-  -- invoke an endpoint
-  Emulator.callEndpoint @"foo" h 42
-  Emulator.callEndpoint @"bar" h "Haskell"
+    h <- activateContractWallet (knownWallet 1) contract3
+
+    Emulator.callEndpoint @"foo" h 42
+    void $ Emulator.waitNSlots 1
+
+    Emulator.callEndpoint @"bar" h "Haskell"
+    void $ Emulator.waitNSlots 1
 
 test3 :: IO ()
 test3 = runEmulatorTraceIO trace3
 
--- -------------------------------------------------------------------
--- MyContract4 - using `w` parameter
--- -------------------------------------------------------------------
+-------------------------------------------------
+-- Contract 4 - Observable State (Cleaner)
+-------------------------------------------------
 
 myContract4 :: Contract [Int] Empty Text ()
 myContract4 = do
-  void $ Contract.waitNSlots 10
-  tell [1]
-  void $ Contract.waitNSlots 10
-  tell [2]
-  void $ Contract.waitNSlots 10
+    waitAndTell 10 [1]
+    waitAndTell 10 [2]
+  where
+    waitAndTell n val = do
+        void $ Contract.waitNSlots n
+        tell val
 
 myTrace4 :: EmulatorTrace ()
 myTrace4 = do
-  h <- activateContractWallet (knownWallet 1) myContract4
-  void $ Emulator.waitNSlots 5
+    h <- activateContractWallet (knownWallet 1) myContract4
 
-  -- pass handle of contract to the one we want to observe
-  xs <- observableState h
+    logState "Initial" h
+    void $ Emulator.waitNSlots 10
 
-  -- output log info from contract4
-  Extras.logInfo $ show xs
+    logState "After 10 slots" h
+    void $ Emulator.waitNSlots 10
 
-  void $ Emulator.waitNSlots 10
-  ys <- observableState h
+    logState "After 20 slots" h
+    void $ Emulator.waitNSlots 10
 
-  Extras.logInfo $ show ys
+    logState "After 30 slots" h
 
-  void $ Emulator.waitNSlots 10
-  zs <- observableState h
-
-  Extras.logInfo $ show zs
+  where
+    logState label h = do
+        xs <- observableState h
+        Extras.logInfo $ label ++ ": " ++ show xs
 
 test4 :: IO ()
 test4 = runEmulatorTraceIO myTrace4
